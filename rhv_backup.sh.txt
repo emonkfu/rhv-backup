@@ -1,0 +1,85 @@
+﻿#!/bin/bash
+# ---------------------------------
+#   Author: Ryan Groten
+#   Github: https://github.com/rgroten/ovirt-api-scripts/blob/master/scripts/ovirt-backup-db.sh
+#   Mods  : Jason Woods <jwoods@redhat>
+#   Description:
+#           Script to backup the ovirt manager database.
+#           Requires the engine-db user password in $PGPASSFILE (.pgpass)
+#           ^ this is default unless it has been removed post RHV-M install
+# ---------------------------------
+# RHV 4.0+ has switched to creating GZIP files
+
+
+# Path to backup db to
+BACKUPPATH="/var/lib/ovirt-engine-backups"
+# Backup type
+BACKUPTYPE="tar.gz"
+# Backup file name
+BACKUPFILE="${BACKUPPATH}/engine-backup-$(date +%Y%m%d%H%M%S).$(hostname).${BACKUPTYPE}"
+# Log of backup
+BACKUPLOG="/var/log/ovirt-engine-backups.log"
+# Keep backups for BACKUPHISTORY days, remove any older backups. Disabled if blank.
+BACKUPHISTORY="15"
+# Second server to copy backup files to. Disabled if blank. Requires ssh-key
+BACKUPHOST="my-backup-host.example.com"
+# REMOTEPATH is directory on remote server to copy backups to. Same as BACKUPPATH if blank.
+REMOTEPATH=""
+
+
+# if REMOTEPATH is blank, make it the same as BACKUPPATH
+[ -z "${REMOTEPATH}" ] && REMOTEPATH="${BACKUPPATH}"
+
+
+function backup_pre () {
+  # create BACKUPPATH if it does not exist
+  if [ ! -d "${BACKUPPATH}" ]; then
+      mkdir -p "${BACKUPPATH}"
+      if [ $? -ne 0 ]; then
+          echo "ERROR: failed to create BACKUPPATH \"${BACKUPPATH}\""
+          echo "Aborting backup by \"${0}\"."
+          exit 99
+      fi
+  fi
+}
+
+
+function backup_post () {
+  # make backup of backup script
+  cp -va "${0}" "${BACKUPPATH}"
+
+
+  # Copy backup to standby ovirt manager or another host
+  if [ -n "${BACKUPHOST}" ]; then
+      scp -q "${BACKUPFILE}" "${BACKUPHOST}:${REMOTEPATH}"
+      scp -q "${0}" "${BACKUPHOST}:${REMOTEPATH}"
+      if [ $? -ne 0 ]; then
+          echo "ERROR: copying backup file to remote RHV-M backup location"
+          exit_code=1
+      fi
+  fi
+
+
+  # if BACKUPHISTORY is defined, remove backups older than BACKUPHISTORY days
+  if [ -n "${BACKUPHISTORY}" ]; then
+      # Cleanup old backups that are older than BACKUPHISTORY days
+      find "${BACKUPPATH}" -name "*.${BACKUPTYPE}" -mtime +"${BACKUPHISTORY}" -exec rm -vf "{}" \;
+      if [ -n "${BACKUPHOST}" ]; then
+          ssh -q "${BACKUPHOST}" "find \"${REMOTEPATH}\" -name \"*.${BACKUPTYPE}\" -mtime +\"${BACKUPHISTORY}\" -name "*.$(hostname).${BACKUPTYPE}" -exec rm -f \"{}\" \;"
+      fi
+  fi
+}
+
+
+
+
+backup_pre | tee -a "${BACKUPLOG}"
+/usr/bin/engine-backup --mode=backup --scope=all --file="${BACKUPFILE}" --log="${BACKUPLOG}" > /dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR: backing up RHV-M database using engine-backup - backup not completed" | tee -a "${BACKUPLOG}"
+    exit_code=1
+fi
+backup_post | tee -a "${BACKUPLOG}"
+
+
+exit $exit_code
